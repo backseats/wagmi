@@ -343,15 +343,14 @@ export function injected(parameters: InjectedParameters = {}) {
       const chain = config.chains.find((x) => x.id === chainId)
       if (!chain) throw new SwitchChainError(new ChainNotConfiguredError())
 
-      const promise = new Promise<void>((resolve) => {
-        const listener = ((data) => {
-          if ('chainId' in data && data.chainId === chainId) {
-            config.emitter.off('change', listener)
-            resolve()
-          }
-        }) satisfies Parameters<typeof config.emitter.on>[1]
-        config.emitter.on('change', listener)
+      let resolve!: () => void
+      const promise = new Promise<void>((r) => {
+        resolve = r
       })
+      const listener = ((data) => {
+        if ('chainId' in data && data.chainId === chainId) resolve()
+      }) satisfies Parameters<typeof config.emitter.on>[1]
+      config.emitter.on('change', listener)
 
       try {
         await Promise.all([
@@ -439,6 +438,9 @@ export function injected(parameters: InjectedParameters = {}) {
         if (error.code === UserRejectedRequestError.code)
           throw new UserRejectedRequestError(error)
         throw new SwitchChainError(error)
+      } finally {
+        // Also on failure, or the leftover listener breaks wagmi's listener bookkeeping
+        config.emitter.off('change', listener)
       }
     },
     async onAccountsChanged(accounts) {

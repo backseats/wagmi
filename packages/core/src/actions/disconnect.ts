@@ -1,4 +1,10 @@
-import type { Config, Connection, Connector } from '../createConfig.js'
+import {
+  getActivity,
+  isLive,
+  removeConnection,
+  unlisten,
+} from '../connection.js'
+import type { Config, Connector } from '../createConfig.js'
 import type { BaseErrorType, ErrorType } from '../errors/base.js'
 import type {
   ConnectorNotConnectedErrorType,
@@ -26,39 +32,27 @@ export async function disconnect(
   if (parameters.connector) connector = parameters.connector
   else {
     const { connections, current } = config.state
-    const connection = connections.get(current!)
-    connector = connection?.connector
+    connector = connections.get(current!)?.connector
   }
+  const uid = connector?.uid
+  // Stop an in-flight `reconnect` from restoring this connector afterwards
+  const activity = getActivity(config)
+  if (connector && activity.reconnecting)
+    activity.disconnected.add(connector.id)
 
-  const connections = config.state.connections
+  // A connector restored from storage has no methods yet, so disconnect the
+  // configured connector it stands for.
+  if (connector && !isLive(connector))
+    connector = config.connectors.find((x) => x.id === connector!.id)
 
-  if (connector) {
-    await connector.disconnect()
-    connector.emitter.off('change', config._internal.events.change)
-    connector.emitter.off('disconnect', config._internal.events.disconnect)
-    connector.emitter.on('connect', config._internal.events.connect)
-
-    connections.delete(connector.uid)
+  try {
+    await connector?.disconnect()
+  } catch (error) {
+    if (connector) activity.disconnected.delete(connector.id)
+    throw error
   }
-
-  config.setState((x) => {
-    // if no connections exist, move to disconnected state
-    if (connections.size === 0)
-      return {
-        ...x,
-        connections: new Map(),
-        current: null,
-        status: 'disconnected',
-      }
-
-    // switch over to another connection
-    const nextConnection = connections.values().next().value as Connection
-    return {
-      ...x,
-      connections: new Map(connections),
-      current: nextConnection.connector.uid,
-    }
-  })
+  if (connector) unlisten(config._internal.events, connector)
+  config.setState((x) => removeConnection(x, uid))
 
   // Set recent connector if exists
   {

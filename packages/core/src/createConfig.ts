@@ -15,6 +15,13 @@ import {
 import { persist, subscribeWithSelector } from 'zustand/middleware'
 import { createStore, type Mutate, type StoreApi } from 'zustand/vanilla'
 
+import {
+  addConnection,
+  isLive,
+  listen,
+  removeConnection,
+  unlisten,
+} from './connection.js'
 import type {
   ConnectorEventMap,
   CreateConnectorFn,
@@ -326,10 +333,11 @@ export function createConfig<
 
     const newConnectors: Connector[] = []
     for (const providerDetail of providerDetails) {
-      if (connectorRdnsSet.has(providerDetail.info.rdns)) continue
-      const connector = setup(providerDetailToConnector(providerDetail))
-      if (connectorIdSet.has(connector.id)) continue
-      newConnectors.push(connector)
+      const { rdns } = providerDetail.info
+      // Check before `setup`, which attaches listeners to the wallet's provider.
+      // EIP-6963 connectors use the provider's `rdns` as their `id`.
+      if (connectorRdnsSet.has(rdns) || connectorIdSet.has(rdns)) continue
+      newConnectors.push(setup(providerDetailToConnector(providerDetail)))
     }
 
     if (storage && !store.persist.hasHydrated()) return
@@ -339,6 +347,8 @@ export function createConfig<
   /////////////////////////////////////////////////////////////////////////////////////////////////
   // Emitter listeners
   /////////////////////////////////////////////////////////////////////////////////////////////////
+
+  const events = { change, connect, disconnect }
 
   function change(data: EventData<ConnectorEventMap, 'change'>) {
     store.setState((x) => {
@@ -364,59 +374,22 @@ export function createConfig<
     )
       return
 
-    store.setState((x) => {
-      const connector = connectors.getState().find((x) => x.uid === data.uid)
-      if (!connector) return x
-
-      if (connector.emitter.listenerCount('connect'))
-        connector.emitter.off('connect', connect)
-      if (!connector.emitter.listenerCount('change'))
-        connector.emitter.on('change', change)
-      if (!connector.emitter.listenerCount('disconnect'))
-        connector.emitter.on('disconnect', disconnect)
-
-      return {
-        ...x,
-        connections: new Map(x.connections).set(data.uid, {
-          accounts: data.accounts as readonly [Address, ...Address[]],
-          chainId: data.chainId,
-          connector: connector,
-        }),
-        current: data.uid,
-        status: 'connected',
-      }
-    })
+    const connector = connectors.getState().find((x) => x.uid === data.uid)
+    if (!connector) return
+    listen({ change, connect, disconnect }, connector)
+    store.setState((x) =>
+      addConnection(x, {
+        accounts: data.accounts as readonly [Address, ...Address[]],
+        chainId: data.chainId,
+        connector,
+      }),
+    )
   }
   function disconnect(data: EventData<ConnectorEventMap, 'disconnect'>) {
-    store.setState((x) => {
-      const connection = x.connections.get(data.uid)
-      if (connection) {
-        const connector = connection.connector
-        if (connector.emitter.listenerCount('change'))
-          connection.connector.emitter.off('change', change)
-        if (connector.emitter.listenerCount('disconnect'))
-          connection.connector.emitter.off('disconnect', disconnect)
-        if (!connector.emitter.listenerCount('connect'))
-          connection.connector.emitter.on('connect', connect)
-      }
-
-      x.connections.delete(data.uid)
-
-      if (x.connections.size === 0)
-        return {
-          ...x,
-          connections: new Map(),
-          current: null,
-          status: 'disconnected',
-        }
-
-      const nextConnection = x.connections.values().next().value as Connection
-      return {
-        ...x,
-        connections: new Map(x.connections),
-        current: nextConnection.connector.uid,
-      }
-    })
+    const connection = store.getState().connections.get(data.uid)
+    if (connection && isLive(connection.connector))
+      unlisten({ change, connect, disconnect }, connection.connector)
+    store.setState((x) => removeConnection(x, data.uid))
   }
 
   return {
@@ -514,7 +487,7 @@ export function createConfig<
           return connectors.subscribe(listener)
         },
       },
-      events: { change, connect, disconnect },
+      events,
     },
   }
 }

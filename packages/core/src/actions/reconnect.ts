@@ -1,5 +1,6 @@
 import type { Address } from 'viem'
 
+import { getActivity, isLive, listen, settle } from '../connection.js'
 import type { CreateConnectorFn } from '../connectors/createConnector.js'
 import type { Config, Connection, Connector } from '../createConfig.js'
 import type { ErrorType } from '../errors/base.js'
@@ -14,22 +15,27 @@ export type ReconnectReturnType = Compute<Connection>[]
 
 export type ReconnectErrorType = ErrorType
 
-const reconnecting = new WeakSet<Config>()
-
 /** https://wagmi.sh/core/api/actions/reconnect */
 export async function reconnect(
   config: Config,
   parameters: ReconnectParameters = {},
 ): Promise<ReconnectReturnType> {
+  const activity = getActivity(config)
   // If already reconnecting, do nothing
-  if (reconnecting.has(config)) return []
-  reconnecting.add(config)
+  if (activity.reconnecting) return []
+  activity.reconnecting = true
+  activity.disconnected.clear()
+  // Disconnected while this reconnect was in flight
+  const disconnected = (connector: Connector) =>
+    activity.disconnected.has(connector.id)
 
   try {
-    config.setState((x) => ({
-      ...x,
-      status: x.current ? 'reconnecting' : 'connecting',
-    }))
+    // A `connect()` in flight owns `status` until it settles
+    if (!activity.connecting)
+      config.setState((x) => ({
+        ...x,
+        status: x.current ? 'reconnecting' : 'connecting',
+      }))
 
     const connectors: Connector[] = []
     if (parameters.connectors?.length) {
@@ -65,7 +71,15 @@ export async function reconnect(
     let connected = false
     const connections: Connection[] = []
     const providers: unknown[] = []
+    // Live connections that aren't restored below are no longer authorized
+    const stale = new Set(
+      [...config.state.connections]
+        .filter(([, c]) => isLive(c.connector))
+        .map(([uid]) => uid),
+    )
+
     for (const connector of sorted) {
+      if (disconnected(connector)) continue
       const provider = await connector.getProvider().catch(() => undefined)
       if (!provider) continue
 
@@ -82,19 +96,29 @@ export async function reconnect(
         .connect({ isReconnecting: true })
         .catch(() => null)
       if (!data) continue
+      if (disconnected(connector)) continue
+      stale.delete(connector.uid)
 
-      connector.emitter.off('connect', config._internal.events.connect)
-      connector.emitter.on('change', config._internal.events.change)
-      connector.emitter.on('disconnect', config._internal.events.disconnect)
+      listen(config._internal.events, connector)
 
       config.setState((x) => {
-        const connections = new Map(connected ? x.connections : new Map()).set(
-          connector.uid,
-          { accounts: data.accounts, chainId: data.chainId, connector },
-        )
+        // The first restored connection replaces the ones restored from
+        // storage, but keeps any a concurrent `connect()` added.
+        const connections = new Map(
+          connected
+            ? x.connections
+            : [...x.connections].filter(
+                ([uid, c]) => isLive(c.connector) && !stale.has(uid),
+              ),
+        ).set(connector.uid, {
+          accounts: data.accounts as readonly [Address, ...Address[]],
+          chainId: data.chainId,
+          connector,
+        })
         return {
           ...x,
-          current: connected ? x.current : connector.uid,
+          current:
+            x.current && connections.has(x.current) ? x.current : connector.uid,
           connections,
         }
       })
@@ -107,24 +131,18 @@ export async function reconnect(
       connected = true
     }
 
-    // Prevent overwriting connected status from race condition
-    if (
-      config.state.status === 'reconnecting' ||
-      config.state.status === 'connecting'
-    ) {
-      // If connecting didn't succeed, set to disconnected
-      if (!connected)
-        config.setState((x) => ({
-          ...x,
-          connections: new Map(),
-          current: null,
-          status: 'disconnected',
-        }))
-      else config.setState((x) => ({ ...x, status: 'connected' }))
-    }
+    if (stale.size)
+      config.setState((x) => ({
+        ...x,
+        connections: new Map(
+          [...x.connections].filter(([uid]) => !stale.has(uid)),
+        ),
+      }))
 
     return connections
   } finally {
-    reconnecting.delete(config)
+    activity.reconnecting = false
+    activity.disconnected.clear()
+    settle(config, true)
   }
 }

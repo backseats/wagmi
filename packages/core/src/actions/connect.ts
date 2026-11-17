@@ -4,6 +4,7 @@ import type {
   UserRejectedRequestErrorType,
 } from 'viem'
 
+import { addConnection, getActivity, listen, settle } from '../connection.js'
 import type { CreateConnectorFn } from '../connectors/createConnector.js'
 import type { Config, Connector } from '../createConfig.js'
 import type { BaseErrorType, ErrorType } from '../errors/base.js'
@@ -110,6 +111,9 @@ export async function connect<
   if (connector.uid === config.state.current)
     throw new ConnectorAlreadyConnectedError()
 
+  const activity = getActivity(config)
+  activity.connecting++
+  let connected = false
   try {
     config.setState((x) => ({ ...x, status: 'connecting' }))
     connector.emitter.emit('message', { type: 'connecting' })
@@ -117,14 +121,11 @@ export async function connect<
     const { connector: _, ...rest } = parameters
     const data = await connector.connect(rest)
 
-    connector.emitter.off('connect', config._internal.events.connect)
-    connector.emitter.on('change', config._internal.events.change)
-    connector.emitter.on('disconnect', config._internal.events.disconnect)
+    listen(config._internal.events, connector)
 
     await config.storage?.setItem('recentConnectorId', connector.id)
-    config.setState((x) => ({
-      ...x,
-      connections: new Map(x.connections).set(connector.uid, {
+    config.setState((x) =>
+      addConnection(x, {
         accounts: (rest.withCapabilities
           ? data.accounts.map((account) =>
               typeof account === 'object' ? account.address : account,
@@ -133,9 +134,8 @@ export async function connect<
         chainId: data.chainId,
         connector: connector,
       }),
-      current: connector.uid,
-      status: 'connected',
-    }))
+    )
+    connected = true
 
     return {
       // TODO(v3): Remove `withCapabilities: true` default behavior so remove compat marshalling
@@ -149,12 +149,9 @@ export async function connect<
         : data.accounts) as never,
       chainId: data.chainId,
     } as never
-  } catch (error) {
-    config.setState((x) => ({
-      ...x,
-      // Keep existing connector connected in case of error
-      status: x.current ? 'connected' : 'disconnected',
-    }))
-    throw error
+  } finally {
+    activity.connecting--
+    // Keep existing connections connected in case of error
+    if (!connected) settle(config)
   }
 }
