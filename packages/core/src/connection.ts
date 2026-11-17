@@ -1,7 +1,8 @@
 import type { Config, Connection, Connector, State } from './createConfig.js'
 
 // Every write to the connection fields (`status`, `current`, `connections`)
-// goes through the transitions below, so they can't disagree.
+// goes through the transitions below, and `normalize` runs on every write,
+// so `status`, `current` and `connections` can't disagree.
 
 /**
  * Connectors restored from storage are `{ id, name, type, uid }` only, with
@@ -9,6 +10,19 @@ import type { Config, Connection, Connector, State } from './createConfig.js'
  */
 export function isLive(connector: Connector): boolean {
   return typeof connector.getProvider === 'function'
+}
+
+/** Enforces the invariants that must hold after every write. */
+export function normalize<state extends State<any>>(state: state): state {
+  let { current, status } = state
+  const { connections } = state
+  // `current` always points at a connection, if there is one
+  if (!current || !connections.has(current))
+    current = connections.keys().next().value ?? null
+  // `connected` always has a connection
+  if (status === 'connected' && !current) status = 'disconnected'
+  if (current === state.current && status === state.status) return state
+  return { ...state, current, status }
 }
 
 export function addConnection<state extends State<any>>(
@@ -30,11 +44,10 @@ export function removeConnection<state extends State<any>>(
 ): state {
   const connections = new Map(state.connections)
   if (uid) connections.delete(uid)
-  // switch over to another connection
-  const next = connections.keys().next().value
-  if (!next)
+  if (connections.size === 0)
     return { ...state, connections, current: null, status: 'disconnected' }
-  return { ...state, connections, current: next }
+  // keep `current` if it's still connected, otherwise `normalize` picks the next one
+  return { ...state, connections }
 }
 
 /** What runs while the store is being written, per config. */

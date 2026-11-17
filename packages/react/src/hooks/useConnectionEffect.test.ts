@@ -1,5 +1,5 @@
 import { mock } from '@wagmi/connectors'
-import { connect, createConfig, disconnect, http } from '@wagmi/core'
+import { connect, createConfig, disconnect, http, reconnect } from '@wagmi/core'
 import { accounts, chain, config } from '@wagmi/test'
 import { createWrapper, renderHook } from '@wagmi/test/react'
 import { createElement, Fragment } from 'react'
@@ -82,4 +82,53 @@ test('behavior: connect called on reconnect', async () => {
   })
 
   await disconnect(config)
+})
+
+test('behavior: connect called on wallet-initiated connect', async () => {
+  const config = createConfig({
+    chains: [chain.mainnet],
+    connectors: [mock({ accounts })],
+    storage: null,
+    transports: { [chain.mainnet.id]: http() },
+  })
+  const onConnect = vi.fn()
+  await renderHook(() => useConnectionEffect({ config, onConnect }))
+
+  const [connector] = config.connectors
+  connector!.emitter.emit('connect', { accounts, chainId: chain.mainnet.id })
+
+  await vi.waitFor(() => expect(onConnect).toBeCalledTimes(1))
+  expect(onConnect.mock.calls[0]![0].isReconnected).toBe(false)
+  await disconnect(config)
+})
+
+test('behavior: disconnect called when a restored session fails to reconnect', async () => {
+  const config = createConfig({
+    chains: [chain.mainnet],
+    connectors: [mock({ accounts })], // not authorized, so it won't reconnect
+    storage: null,
+    transports: { [chain.mainnet.id]: http() },
+  })
+  const { id, name, type } = config.connectors[0]!
+  config.setState((x) => ({
+    ...x,
+    connections: new Map([
+      [
+        'stored',
+        {
+          accounts,
+          chainId: chain.mainnet.id,
+          connector: { id, name, type, uid: 'stored' } as any,
+        },
+      ],
+    ]),
+    current: 'stored',
+    status: 'reconnecting',
+  }))
+  const onDisconnect = vi.fn()
+  await renderHook(() => useConnectionEffect({ config, onDisconnect }))
+
+  await reconnect(config)
+  expect(config.state.status).toBe('disconnected')
+  await vi.waitFor(() => expect(onDisconnect).toBeCalledTimes(1))
 })

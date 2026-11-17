@@ -4,11 +4,14 @@ import type {
   SwitchChainErrorType as viem_SwitchChainErrorType,
 } from 'viem'
 
+import { isLive } from '../connection.js'
 import type { Config } from '../createConfig.js'
 import type { BaseErrorType, ErrorType } from '../errors/base.js'
 import {
   ChainNotConfiguredError,
   type ChainNotConfiguredErrorType,
+  ConnectorUnavailableReconnectingError,
+  type ConnectorUnavailableReconnectingErrorType,
 } from '../errors/config.js'
 import {
   type ProviderNotFoundErrorType,
@@ -43,6 +46,7 @@ export type SwitchChainReturnType<
 export type SwitchChainErrorType =
   | SwitchChainNotSupportedErrorType
   | ChainNotConfiguredErrorType
+  | ConnectorUnavailableReconnectingErrorType
   // connector.switchChain()
   | ProviderNotFoundErrorType
   | UserRejectedRequestErrorType
@@ -67,6 +71,9 @@ export async function switchChain<
   )
   if (connection) {
     const connector = connection.connector
+    // Restored from storage and not reconnected yet
+    if (!isLive(connector))
+      throw new ConnectorUnavailableReconnectingError({ connector })
     if (!connector.switchChain)
       throw new SwitchChainNotSupportedError({ connector })
     const chain = await connector.switchChain({
