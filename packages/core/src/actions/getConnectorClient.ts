@@ -8,6 +8,7 @@ import {
 } from 'viem'
 import { getAddress, parseAccount } from 'viem/utils'
 
+import { isLive } from '../connection.js'
 import type { Config, Connection } from '../createConfig.js'
 import type { ErrorType } from '../errors/base.js'
 import {
@@ -106,6 +107,11 @@ export async function getConnectorClient<
     }
   } else connection = config.state.connections.get(config.state.current!)
   if (!connection) throw new ConnectorNotConnectedError()
+  // Restored from storage and not reconnected yet
+  if (!isLive(connection.connector))
+    throw new ConnectorUnavailableReconnectingError({
+      connector: connection.connector,
+    })
 
   const chainId = parameters.chainId ?? connection.chainId
 
