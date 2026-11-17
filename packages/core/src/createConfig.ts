@@ -19,6 +19,7 @@ import {
   addConnection,
   isLive,
   listen,
+  normalize,
   removeConnection,
   unlisten,
 } from './connection.js'
@@ -265,11 +266,11 @@ export function createConfig<
                 persistedState,
                 currentState.chainId,
               )
-              return {
+              return normalize({
                 ...currentState,
                 ...(persistedState as object),
                 chainId,
-              }
+              })
             },
             skipHydration: ssr,
             storage: storage as Storage<Record<string, unknown>>,
@@ -348,10 +349,13 @@ export function createConfig<
   // Emitter listeners
   /////////////////////////////////////////////////////////////////////////////////////////////////
 
+  function write(fn: (state: State) => State) {
+    store.setState((x: State) => normalize(fn(x)), true)
+  }
   const events = { change, connect, disconnect }
 
   function change(data: EventData<ConnectorEventMap, 'change'>) {
-    store.setState((x) => {
+    write((x) => {
       const connection = x.connections.get(data.uid)
       if (!connection) return x
       return {
@@ -377,7 +381,7 @@ export function createConfig<
     const connector = connectors.getState().find((x) => x.uid === data.uid)
     if (!connector) return
     listen({ change, connect, disconnect }, connector)
-    store.setState((x) =>
+    write((x) =>
       addConnection(x, {
         accounts: data.accounts as readonly [Address, ...Address[]],
         chainId: data.chainId,
@@ -389,7 +393,7 @@ export function createConfig<
     const connection = store.getState().connections.get(data.uid)
     if (connection && isLive(connection.connector))
       unlisten({ change, connect, disconnect }, connection.connector)
-    store.setState((x) => removeConnection(x, data.uid))
+    write((x) => removeConnection(x, data.uid))
   }
 
   return {
@@ -418,7 +422,7 @@ export function createConfig<
       const isCorrupt = Object.keys(initialState).some((x) => !(x in newState))
       if (isCorrupt) newState = initialState
 
-      store.setState(newState, true)
+      store.setState(normalize(newState), true)
     },
     subscribe(selector, listener, options) {
       return store.subscribe(
@@ -438,10 +442,8 @@ export function createConfig<
       mipd,
       async revalidate() {
         // Check connections to see if they are still active
-        const state = store.getState()
-        const connections = state.connections
-        let current = state.current
-        for (const [, connection] of connections) {
+        const stale: string[] = []
+        for (const [, connection] of store.getState().connections) {
           const connector = connection.connector
           // check if `connect.isAuthorized` exists
           // partial connectors in storage do not have it
@@ -450,11 +452,9 @@ export function createConfig<
             : false
           if (isAuthorized) continue
           // Remove stale connection
-          connections.delete(connector.uid)
-          if (current === connector.uid) current = null
+          stale.push(connector.uid)
         }
-        // set connections
-        store.setState((x) => ({ ...x, connections, current }))
+        write((x) => stale.reduce(removeConnection, x))
       },
       store,
       ssr: Boolean(ssr),

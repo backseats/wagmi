@@ -465,6 +465,9 @@ test('behavior: revalidate connections', async () => {
     },
   })
 
+  // Storage hydrates asynchronously and would replace the connections set below
+  await vi.waitUntil(() => config._internal.store.persist.hasHydrated())
+
   const connections = new Map<string, Connection>()
   const c1 = config.connectors.at(0)!
   const c2 = config.connectors.at(1)!
@@ -514,7 +517,8 @@ test('behavior: revalidate removes connection if `isAuthorized` rejects', async 
 
   await expect(config._internal.revalidate()).resolves.toBeUndefined()
   expect([...config.state.connections.keys()]).toEqual([c2.uid])
-  expect(config.state.current).toBeNull()
+  // `current` moves to the remaining connection instead of dangling
+  expect(config.state.current).toBe(c2.uid)
 })
 
 test('behavior: wallet-initiated connect removes the connect listener', async () => {

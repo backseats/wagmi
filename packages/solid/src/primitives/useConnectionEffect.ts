@@ -16,16 +16,13 @@ export function useConnectionEffect(
     const unsubscribe = watchConnection(config(), {
       onChange(data, prevData) {
         if (
-          (prevData.status === 'reconnecting' ||
-            (prevData.status === 'connecting' &&
-              prevData.address === undefined)) &&
-          data.status === 'connected'
+          data.status === 'connected' &&
+          prevData.status !== 'connected' &&
+          // a `connect()` while already connected (keeps today's behavior)
+          !(prevData.status === 'connecting' && prevData.address)
         ) {
           const { address, addresses, chain, chainId, connector } = data
-          const isReconnected =
-            prevData.status === 'reconnecting' ||
-            // if `previousAccount.status` is `undefined`, the connector connected immediately.
-            prevData.status === undefined
+          const isReconnected = prevData.status === 'reconnecting'
           onConnect?.({
             address,
             addresses,
@@ -34,10 +31,8 @@ export function useConnectionEffect(
             connector,
             isReconnected,
           })
-        } else if (
-          prevData.status === 'connected' &&
-          data.status === 'disconnected'
-        )
+        } else if (prevData.isConnected && data.status === 'disconnected')
+          // includes a restored session failing to reconnect
           onDisconnect?.()
       },
     })

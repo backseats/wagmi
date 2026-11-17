@@ -47,12 +47,12 @@ export async function disconnect(
 
   try {
     await connector?.disconnect()
-  } catch (error) {
-    if (connector) activity.disconnected.delete(connector.id)
-    throw error
+  } finally {
+    // The wallet can fail to disconnect (e.g. extension removed), but the
+    // user asked to disconnect, so the connection is removed either way.
+    if (connector) unlisten(config._internal.events, connector)
+    config.setState((x) => removeConnection(x, uid))
   }
-  if (connector) unlisten(config._internal.events, connector)
-  config.setState((x) => removeConnection(x, uid))
 
   // Set recent connector if exists
   {

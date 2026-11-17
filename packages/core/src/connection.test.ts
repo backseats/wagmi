@@ -1,12 +1,13 @@
 import { accounts, mainnet } from '@wagmi/test'
 import { http } from 'viem'
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 
 import { connect } from './actions/connect.js'
 import { disconnect } from './actions/disconnect.js'
 import { getConnection } from './actions/getConnection.js'
 import { getConnectorClient } from './actions/getConnectorClient.js'
 import { reconnect } from './actions/reconnect.js'
+import { switchChain } from './actions/switchChain.js'
 import {
   type CreateConnectorFn,
   createConnector,
@@ -60,6 +61,13 @@ function createPendingConnector(id = 'pending') {
   })
   return { connectorFn, release }
 }
+
+test('invariant: `current` always points at a connection', () => {
+  const config = createTestConfig([mock({ accounts })])
+  config.setState((x) => ({ ...x, current: 'missing', status: 'connected' }))
+  expect(config.state.current).toBeNull()
+  expect(config.state.status).toBe('disconnected')
+})
 
 test('connect: rejected with only stored connections is not connected', async () => {
   const config = createTestConfig([
@@ -119,6 +127,19 @@ test('getConnectorClient: stored connector while reconnecting', async () => {
   await expect(getConnectorClient(config)).rejects.toThrow(
     'unavailable while reconnecting',
   )
+})
+
+test('disconnect: wallet failing to disconnect still disconnects', async () => {
+  const config = createTestConfig([mock({ accounts })])
+  const [connector] = config.connectors
+  await connect(config, { connector: connector! })
+  vi.spyOn(connector!, 'disconnect').mockRejectedValueOnce(
+    new Error('extension removed'),
+  )
+
+  await expect(disconnect(config)).rejects.toThrow('extension removed')
+  expect(config.state.status).toBe('disconnected')
+  expect(config.state.connections.size).toBe(0)
 })
 
 test('listeners: a connector-added change listener does not stop syncing', () => {
@@ -211,4 +232,30 @@ test('reconnect: a failed connect() in the meantime goes back to reconnecting', 
   await promise
   expect(config.state.status).toBe('connected')
   expect(config.state.current).toBe(pending!.uid)
+})
+
+test('switchChain: stored connector while reconnecting', async () => {
+  const config = createTestConfig([mock({ accounts })])
+  restoreFromStorage(config, config.connectors[0]!)
+  config.setState((x) => ({ ...x, status: 'reconnecting' }))
+
+  await expect(switchChain(config, { chainId: mainnet.id })).rejects.toThrow(
+    'unavailable while reconnecting',
+  )
+})
+
+test('disconnect: removing another connection keeps the current one', async () => {
+  const config = createTestConfig([
+    mock({ accounts }),
+    mock({ accounts }),
+    mock({ accounts }),
+  ])
+  const [a, b, c] = config.connectors
+  await connect(config, { connector: a! })
+  await connect(config, { connector: b! })
+  await connect(config, { connector: c! })
+
+  await disconnect(config, { connector: b! })
+  expect(config.state.current).toBe(c!.uid)
+  expect(config.state.status).toBe('connected')
 })
